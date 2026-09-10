@@ -1,0 +1,72 @@
+# Open WebUI — interfata de chat pentru agentul local.
+# Configurat pentru izolare completa: nimic nu iese din masina.
+#
+# Ollama NU ruleaza aici. E instalat nativ pe Windows ca sa aiba acces direct
+# CUDA la GTX 1660 Ti. Containerul il contacteaza prin host.docker.internal.
+
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: agent-local-webui
+    restart: unless-stopped
+
+    ports:
+      # 127.0.0.1 explicit. Fara el, Docker publica pe 0.0.0.0 si interfata
+      # devine accesibila din toata reteaua locala.
+      - "127.0.0.1:3000:8080"
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    environment:
+      # --- Model ---
+      OLLAMA_BASE_URL: "http://host.docker.internal:11434"
+
+      # --- Fara conturi ---
+      # Deschizi browserul si intri direct in chat.
+      WEBUI_AUTH: "False"
+
+      # --- Nicio ruta spre servicii externe ---
+      # Fara asta, Open WebUI interogheaza api.openai.com pentru lista de modele.
+      ENABLE_OPENAI_API: "False"
+      # Blocheaza descarcarile runtime de pe HuggingFace (embeddings, whisper).
+      # Consecinta acceptata: RAG / atasare de documente nu functioneaza pana
+      # cand modelul de embedding e pre-descarcat deliberat.
+      OFFLINE_MODE: "True"
+      ENABLE_WEB_SEARCH: "False"
+      ENABLE_IMAGE_GENERATION: "False"
+      # Nu genera titluri/tag-uri automat pentru conversatii. Fiecare generare e
+      # un apel suplimentar la model, cu conteinutul conversatiei intr-un prompt
+      # separat. Nu iese nimic din masina (modelul e local), dar pe 6 GB VRAM
+      # inseamna timp si memorie irosite la fiecare mesaj.
+      ENABLE_TAGS_GENERATION: "False"
+      ENABLE_TITLE_GENERATION: "False"
+      ENABLE_FOLLOW_UP_GENERATION: "False"
+      ENABLE_AUTOCOMPLETE_GENERATION: "False"
+
+      # --- Zero telemetrie ---
+      ANONYMIZED_TELEMETRY: "False"
+      DO_NOT_TRACK: "True"
+      SCARF_NO_ANALYTICS: "True"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+
+    volumes:
+      # Volum Docker numit, nu bind mount in folderul proiectului: Open WebUI
+      # foloseste SQLite, iar locking-ul SQLite peste bind mount Windows->Linux
+      # produce coruperi intermitente ale bazei.
+      - open-webui-data:/app/backend/data
+
+    # Plafon de memorie: la 15.4 GB RAM total, containerul nu are voie sa
+    # concureze cu modelul pentru RAM.
+    mem_limit: 2g
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+
+volumes:
+  open-webui-data:
+    name: agent-local-webui-data
