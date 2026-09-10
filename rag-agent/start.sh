@@ -88,6 +88,7 @@ command -v setsid    >/dev/null || NEED="$NEED util-linux"
 command -v free      >/dev/null || NEED="$NEED procps-ng"
 command -v pgrep     >/dev/null || NEED="$NEED procps-ng"
 command -v tmux      >/dev/null || NEED="$NEED tmux"
+command -v ss        >/dev/null || NEED="$NEED iproute"
 
 # Python >= 3.7 (avem nevoie de subprocess capture_output).
 # Oracle Linux 8 vine cu 3.6 -> instalam python3.11. OL9 are 3.9, e ok.
@@ -289,6 +290,8 @@ source "$AGENT_HOME/config.env"
 say "5/7  Pornesc serverele (CPU, $THREADS threads, RAM ${RAM_GB} GB)"
 bash "$AGENT_HOME/bin/serve.sh" start \
   || die "serverele nu au pornit. Vezi:  tail -n 40 $AGENT_HOME/logs/llm.log"
+# serve.sh poate schimba portul daca era ocupat de altceva -> recitim configuratia
+source "$AGENT_HOME/config.env"
 
 # ---------------------------------------------------------------- 6. documente
 say "6/7  Documente"
