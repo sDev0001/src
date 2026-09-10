@@ -14,54 +14,68 @@ scp C:\Users\sergi\Desktop\agenti\rag-agent\agent-bundle.sh root@IP_SERVER:/root
 
 ## Pornire
 
-Pe server, **o singură comandă**, fără `chmod`, fără nimic altceva:
+O singură dată, la instalare:
 
 ```bash
 sudo bash /root/agent-bundle.sh
 ```
 
-`bash <fișier>` rulează scriptul indiferent dacă are bit de execuție sau nu —
-de aceea asta e varianta care nu poate da `command not found` sau
-`Permission denied`.
-
-Dacă preferi cu `./`:
+**De atunci înainte, un singur cuvânt, de oriunde:**
 
 ```bash
-chmod +x /root/agent-bundle.sh && sudo /root/agent-bundle.sh
+agent
 ```
 
-Ambele fac exact același lucru. Prima e mai sigură.
+Asta e tot. `agent` verifică serverele și le repornește dacă au picat,
+reindexează documentele noi dacă ai adăugat ceva, și te lasă direct în prompt.
+Nu mai pornești nimic din `bin/` manual.
+
+```bash
+agent --status      # ce rulează, ce model, câte fragmente are indexul
+agent --stop        # oprește tot
+agent --reingest    # reconstruiește indexul de la zero
+agent --model-30b   # descarcă Qwen3-30B-A3B (18 GB, ~4x mai rapid)
+```
 
 **De ce primeai `command not found`:** `./start.sh` caută fișierul în folderul
-în care te afli în acel moment. Dacă fișierele nu erau copiate pe server, sau
-erai în alt folder, bash nu găsea nimic. Cu calea completă
-`bash /root/agent-bundle.sh` nu mai depinde de unde te afli.
+în care te afli în acel moment. Comanda `agent` se instalează în
+`/usr/local/bin/`, care e în `PATH`, deci merge din orice folder.
 
 ### Ce face la prima rulare
 
 1. instalează pachetele lipsă (poppler-utils, tesseract + română, python3.11, numpy)
-2. creează toate folderele
+2. creează toate folderele și comanda `agent`
 3. compilează llama.cpp dacă nu-l găsește (5–15 min, o singură dată) — **tu nu
-   intri niciodată în folderul llama.cpp**, se ocupă scriptul
+   intri niciodată în folderul llama.cpp**
 4. descarcă modelul de embeddings (~600 MB)
 5. folosește modelul `.gguf` pe care îl ai deja; dacă n-ai niciunul, îl descarcă
 6. pornește serverele
 7. indexează documentele și te lasă în prompt
 
-Rulează-l de câte ori vrei — sare peste ce e deja făcut.
+## De ce sunt două servere și un port
 
-```bash
-sudo bash /root/agent-bundle.sh --model-30b   # + Qwen3-30B-A3B (18 GB, ~4x mai rapid)
-sudo bash /root/agent-bundle.sh --reingest    # reconstruiește indexul de la zero
-bash /root/agent-bundle.sh --status           # ce rulează
-bash /root/agent-bundle.sh --stop             # oprește serverele
+Nu vorbești tu cu portul — e cablul intern dintre două programe de pe același
+server:
+
+```
+     tu, în consolă
+          │
+     agent.py  ──── caută în index ────►  chunks.jsonl + emb.npy
+          │
+          ├──► 127.0.0.1:8081   llama-server cu bge-m3   (căutare semantică)
+          └──► 127.0.0.1:8080   llama-server cu Qwen3    (scrie răspunsul)
 ```
 
-După prima instalare, scurtătura pentru discuție e:
+Cele două `llama-server` stau pornite ca să țină modelele **încărcate în RAM**.
+Asta era exact problema cu `llama-cli`: reîncărca 9 GB de pe disc la fiecare
+întrebare. `127.0.0.1` înseamnă că porturile sunt accesibile doar de pe server —
+nu sunt expuse în rețea, nu ai nevoie de firewall.
 
-```bash
-/opt/agent/bin/agent.py
-```
+Dacă unul din ele cade, `agent` îl repornește singur. `serve.sh` încearcă mai
+multe variante de flaguri (`--embeddings` / `--embedding`, cu și fără
+`--pooling cls`, cu și fără `--mlock`), pentru că numele diferă între versiunile
+de llama.cpp. Dacă tot nu pornește, îți arată automat ultimele 20 de linii din
+log în loc să tacă.
 
 ## Docker nu e folosit
 
@@ -78,7 +92,7 @@ exact asta și inferența ar fi mai lentă. Nu instalez și nu pornesc Docker; d
 /opt/agent/docs/md/      markdown, txt, cod
 ```
 
-După ce adaugi ceva: `sudo bash /root/agent-bundle.sh` din nou (re-indexează doar ce e nou).
+După ce adaugi ceva: `agent` din nou (re-indexează doar ce e nou).
 
 ---
 
@@ -162,7 +176,7 @@ Comenzi: `exit`, `/nou` (șterge istoricul), `/k 12` (mai multe fragmente),
 Non-interactiv, pentru scripturi:
 
 ```bash
-/opt/agent/bin/agent.py --once "care sunt pașii de deploy?"
+agent --once "care sunt pașii de deploy?"
 ```
 
 ---

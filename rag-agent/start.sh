@@ -8,14 +8,19 @@
 #  creeaza folderele, descarca modelul de embeddings, porneste serverele,
 #  indexeaza documentele si te lasa in prompt.
 #  Nu trebuie sa intri niciodata in folderul llama.cpp si sa nu editezi nimic.
-#  Poate fi rulat de oricate ori: sare peste ce e deja facut.
+#  Poate fi rulat de oricate ori: sare peste ce e deja facut si repara ce a picat.
+#  Dupa prima rulare instaleaza comanda globala "agent" -- de atunci scrii doar
+#  "agent", de oriunde, si ea face tot: verifica serverele, reindexeaza ce e nou
+#  si te lasa in prompt.
 #
 #  Optiuni:
 #     --model-30b   descarca Qwen3-30B-A3B (18 GB, de ~4x mai rapid pe CPU)
 #     --reingest    forteaza reconstruirea completa a indexului
 #     --no-agent    porneste doar serverele, fara promptul interactiv
+#     --show        arata si fragmentele brute trimise modelului
+#     --once "..."  o singura intrebare, non-interactiv (pentru scripturi)
 #     --stop        opreste serverele
-#     --status      arata ce ruleaza
+#     --status      arata ce ruleaza, ce model, cate fragmente are indexul
 # ============================================================================
 set -uo pipefail
 
@@ -30,17 +35,20 @@ fi
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGENT_HOME="${AGENT_HOME:-/opt/agent}"
 
-WANT_30B=0; REINGEST=0; RUN_AGENT=1; ACTION=start
-for a in "$@"; do
-  case "$a" in
+WANT_30B=0; REINGEST=0; RUN_AGENT=1; ACTION=start; ONCE=""; SHOW=""
+while [ $# -gt 0 ]; do
+  case "$1" in
     --model-30b) WANT_30B=1 ;;
     --reingest)  REINGEST=1 ;;
     --no-agent)  RUN_AGENT=0 ;;
     --stop)      ACTION=stop ;;
     --status)    ACTION=status ;;
-    -h|--help)   sed -n '2,20p' "$0"; exit 0 ;;
-    *) echo "Optiune necunoscuta: $a"; exit 1 ;;
+    --show)      SHOW="--show" ;;
+    --once)      shift; ONCE="$*"; break ;;
+    -h|--help)   sed -n '2,24p' "$0"; exit 0 ;;
+    *) echo "Optiune necunoscuta: $1"; echo "Vezi:  agent --help"; exit 1 ;;
   esac
+  shift
 done
 
 say()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
@@ -142,14 +150,25 @@ as_root mkdir -p "$AGENT_HOME"/models "$AGENT_HOME"/data "$AGENT_HOME"/logs \
                  "$AGENT_HOME"/bin "$AGENT_HOME"/docs/pdf "$AGENT_HOME"/docs/repos \
                  "$AGENT_HOME"/docs/md
 [ "$(id -u)" -ne 0 ] && as_root chown -R "$(id -u):$(id -g)" "$AGENT_HOME"
-if [ "$SELF_DIR" != "$AGENT_HOME" ]; then
+if [ "$SELF_DIR" != "$AGENT_HOME/bin" ]; then
   cp "$SELF_DIR/config.env" "$AGENT_HOME/config.env"
   cp "$SELF_DIR"/bin/agent.py "$SELF_DIR"/bin/ingest.py "$SELF_DIR"/bin/serve.sh \
      "$AGENT_HOME/bin/"
+  cp "$SELF_DIR/start.sh" "$AGENT_HOME/bin/start.sh"
 fi
 chmod +x "$AGENT_HOME"/bin/* 2>/dev/null || true
 # shebang-ul .py sa arate exact spre interpretorul gasit
 sed -i "1s|.*|#!$(command -v "$PY")|" "$AGENT_HOME"/bin/agent.py "$AGENT_HOME"/bin/ingest.py
+
+# O SINGURA comanda globala: "agent". Face tot, de fiecare data, de oriunde.
+printf '#!/usr/bin/env bash\nexec bash %s/bin/start.sh "$@"\n' "$AGENT_HOME" \
+  > "/tmp/.agent-cmd.$$"
+if as_root install -m 755 "/tmp/.agent-cmd.$$" /usr/local/bin/agent 2>/dev/null; then
+  ok "comanda globala: agent"
+else
+  warn "nu am putut crea /usr/local/bin/agent (foloseste: bash $AGENT_HOME/bin/start.sh)"
+fi
+rm -f "/tmp/.agent-cmd.$$"
 ok "docs/pdf  docs/repos  docs/md  models  data  logs  bin"
 
 # ---------------------------------------------------------------- 3. llama.cpp
@@ -286,20 +305,39 @@ if [ "$NDOCS" -eq 0 ]; then
         cd $AGENT_HOME/docs/repos && git clone <url-documentatie>
         cp notite.md         $AGENT_HOME/docs/md/
 
-    Serverele raman pornite.  Oprire:  bash start.sh --stop
+    Serverele raman pornite in RAM.
+
+    Dupa ce pui documentele, o SINGURA comanda, de oriunde:
+
+        agent
+
+    (oprire completa:  agent --stop )
 TXT
   exit 0
 fi
 ok "$NDOCS fisiere gasite"
 
 say "7/7  Indexare"
-[ "$REINGEST" = 1 ] && rm -f "$AGENT_HOME/data/chunks.jsonl" "$AGENT_HOME/data/emb.npy"
-"$PY" "$AGENT_HOME/bin/ingest.py" || die "indexarea a esuat"
+IDX="$AGENT_HOME/data/chunks.jsonl"
+if [ "$REINGEST" = 1 ]; then
+  rm -f "$IDX" "$AGENT_HOME/data/emb.npy"
+fi
+if [ ! -s "$IDX" ]; then
+  "$PY" "$AGENT_HOME/bin/ingest.py" || die "indexarea a esuat"
+elif [ -n "$(find "$AGENT_HOME/docs" -type f -newer "$IDX" -print -quit 2>/dev/null)" ]; then
+  ok "documente noi -> reindexez doar ce s-a schimbat"
+  "$PY" "$AGENT_HOME/bin/ingest.py" || die "indexarea a esuat"
+else
+  ok "index la zi ($(grep -c . "$IDX" 2>/dev/null) fragmente)"
+fi
 
 # ---------------------------------------------------------------- gata
-if [ "$RUN_AGENT" = 1 ] && [ -t 0 ]; then
+if [ -n "$ONCE" ]; then
   echo
-  exec "$PY" "$AGENT_HOME/bin/agent.py"
+  exec "$PY" "$AGENT_HOME/bin/agent.py" $SHOW --once "$ONCE"
+elif [ "$RUN_AGENT" = 1 ] && [ -t 0 ]; then
+  echo
+  exec "$PY" "$AGENT_HOME/bin/agent.py" $SHOW
 else
-  say "Gata. Porneste agentul cu:  $AGENT_HOME/bin/agent.py"
+  say "Gata. Scrie:  agent"
 fi
