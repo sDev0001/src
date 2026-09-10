@@ -2,31 +2,73 @@
 
 Server Oracle Linux, **doar consolă, doar CPU, fără placă video**. 100% offline.
 
-## Pornire — o singură comandă
+## Cum ajunge pe server
 
-```bash
-sudo ./start.sh
+Ai nevoie de **un singur fișier**: `agent-bundle.sh` (21 KB). Conține tot.
+
+Din PowerShell, pe calculatorul tău:
+
+```powershell
+scp C:\Users\sergi\Desktop\agenti\rag-agent\agent-bundle.sh root@IP_SERVER:/root/
 ```
 
-Atât. Scriptul face singur tot:
+## Pornire
 
-1. instalează pachetele lipsă (poppler-utils, tesseract + limba română, python3.11, numpy)
+Pe server, **o singură comandă**, fără `chmod`, fără nimic altceva:
+
+```bash
+sudo bash /root/agent-bundle.sh
+```
+
+`bash <fișier>` rulează scriptul indiferent dacă are bit de execuție sau nu —
+de aceea asta e varianta care nu poate da `command not found` sau
+`Permission denied`.
+
+Dacă preferi cu `./`:
+
+```bash
+chmod +x /root/agent-bundle.sh && sudo /root/agent-bundle.sh
+```
+
+Ambele fac exact același lucru. Prima e mai sigură.
+
+**De ce primeai `command not found`:** `./start.sh` caută fișierul în folderul
+în care te afli în acel moment. Dacă fișierele nu erau copiate pe server, sau
+erai în alt folder, bash nu găsea nimic. Cu calea completă
+`bash /root/agent-bundle.sh` nu mai depinde de unde te afli.
+
+### Ce face la prima rulare
+
+1. instalează pachetele lipsă (poppler-utils, tesseract + română, python3.11, numpy)
 2. creează toate folderele
-3. compilează llama.cpp dacă nu-l găsește (5–15 min, o singură dată)
+3. compilează llama.cpp dacă nu-l găsește (5–15 min, o singură dată) — **tu nu
+   intri niciodată în folderul llama.cpp**, se ocupă scriptul
 4. descarcă modelul de embeddings (~600 MB)
 5. folosește modelul `.gguf` pe care îl ai deja; dacă n-ai niciunul, îl descarcă
 6. pornește serverele
-7. indexează documentele
-8. te lasă în prompt
+7. indexează documentele și te lasă în prompt
 
-Poate fi rulat de câte ori vrei — sare peste ce e deja făcut.
+Rulează-l de câte ori vrei — sare peste ce e deja făcut.
 
 ```bash
-sudo ./start.sh --model-30b   # descarcă și Qwen3-30B-A3B (18 GB, ~4x mai rapid)
-sudo ./start.sh --reingest    # reconstruiește indexul de la zero
-./start.sh --status           # ce rulează
-./start.sh --stop             # oprește serverele
+sudo bash /root/agent-bundle.sh --model-30b   # + Qwen3-30B-A3B (18 GB, ~4x mai rapid)
+sudo bash /root/agent-bundle.sh --reingest    # reconstruiește indexul de la zero
+bash /root/agent-bundle.sh --status           # ce rulează
+bash /root/agent-bundle.sh --stop             # oprește serverele
 ```
+
+După prima instalare, scurtătura pentru discuție e:
+
+```bash
+/opt/agent/bin/agent.py
+```
+
+## Docker nu e folosit
+
+llama.cpp rulează nativ, compilat pe serverul tău cu `-DGGML_NATIVE=ON`, ca să
+folosească instrucțiunile AVX ale procesorului. Într-un container ai pierde
+exact asta și inferența ar fi mai lentă. Nu instalez și nu pornesc Docker; dacă
+îl ai deja, scriptul îți spune că e ignorat.
 
 ## Unde pui documentele
 
@@ -36,7 +78,7 @@ sudo ./start.sh --reingest    # reconstruiește indexul de la zero
 /opt/agent/docs/md/      markdown, txt, cod
 ```
 
-După ce adaugi ceva: `sudo ./start.sh` din nou (re-indexează doar ce e nou).
+După ce adaugi ceva: `sudo bash /root/agent-bundle.sh` din nou (re-indexează doar ce e nou).
 
 ---
 
@@ -94,7 +136,7 @@ Rulează-l în tmux:
 
 ```bash
 tmux new -s agent
-sudo ./start.sh
+sudo bash /root/agent-bundle.sh
 ```
 
 Detach cu `Ctrl+b` apoi `d`, revii cu `tmux attach -t agent`.
@@ -154,10 +196,26 @@ Nu trebuie să modifici nimic — totul se detectează singur. Dacă totuși vre
 - **nu găsește lucruri care sigur sunt în documente** → `agent.py --show` ca să
   vezi ce fragmente a extras; la documente cu tabele mari, `CHUNK_CHARS=700`
 
+## Ce am testat și ce nu
+
+Testat automat aici:
+
+- sintaxa tuturor scripturilor (`bash -n`, `py_compile`)
+- bundle-ul despachetează cele 5 fișiere **byte cu byte identice**, fără CRLF
+- logica de căutare hibridă pe un index de test — întrebarea „cum creez o
+  comandă prin API?" găsește fragmentul corect, cu diacriticele normalizate
+- auto-detecția de threads, model și foldere
+- două bug-uri prinse de teste și reparate: `set -e` oprea bundle-ul înainte
+  să ajungă la `start.sh`, și `mkdir` era presupus reușit fără verificare
+
+**Nu am putut testa** compilarea llama.cpp și `dnf install` — pentru asta ar
+trebui un Oracle Linux real. De aceea fiecare pas își verifică rezultatul și se
+oprește cu un mesaj clar în loc să continue în gol.
+
 ## Dacă ceva nu merge
 
 ```bash
-./start.sh --status
+bash /root/agent-bundle.sh --status
 tail -f /opt/agent/logs/llm.log
 cat /opt/agent/data/manifest.json    # câte chunk-uri are indexul
 ```
