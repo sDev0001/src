@@ -35,7 +35,47 @@ agent --status      # ce rulează, ce model, câte fragmente are indexul
 agent --stop        # oprește tot
 agent --reingest    # reconstruiește indexul de la zero
 agent --model-30b   # descarcă Qwen3-30B-A3B (18 GB, ~4x mai rapid)
+agent --kill-all    # oprește forțat orice llama-server agățat de porturi
 ```
+
+### Pornire curată — `agent-fresh`
+
+Dacă vrei să fii sigur că pornește din prima, indiferent ce a rămas agățat de la
+rularea anterioară:
+
+```bash
+agent-fresh
+```
+
+Închide **tot** (orice `llama-server` de pe mașină), așteaptă să se elibereze
+porturile, apoi pornește normal: servere, indexare, prompt. E același lucru cu
+`agent --fresh`.
+
+Merge și la prima instalare, direct din bundle:
+
+```bash
+sudo bash /root/agent-bundle.sh --fresh
+```
+
+**Când folosești care:**
+
+| | ce face | cât durează |
+|---|---|---|
+| `agent` | refolosește serverele deja pornite | secunde |
+| `agent-fresh` | oprește tot și reîncarcă modelul în RAM | 1–3 min (modelul se recitește) |
+
+Deci `agent` e comanda de zi cu zi. `agent-fresh` e pentru când ceva s-a blocat.
+
+**Serverele nu mor când închizi SSH-ul.** Modelul rămâne încărcat în RAM, deci a
+doua rulare de `agent` intră în prompt imediat, fără să mai aștepte încărcarea.
+Doar promptul interactiv se închide odată cu sesiunea SSH. Dacă vrei ca și
+promptul să supravieţuiască deconectării, pornește-l în `tmux`:
+
+```bash
+tmux new -A -s agent
+```
+
+(ieși cu `Ctrl+B` apoi `D`; te întorci cu aceeaşi comandă)
 
 **De ce primeai `command not found`:** `./start.sh` caută fișierul în folderul
 în care te afli în acel moment. Comanda `agent` se instalează în

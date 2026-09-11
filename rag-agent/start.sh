@@ -21,6 +21,9 @@
 #     --once "..."  o singura intrebare, non-interactiv (pentru scripturi)
 #     --stop        opreste serverele
 #     --status      arata ce ruleaza, ce model, cate fragmente are indexul
+#     --kill-all    opreste FORTAT orice llama-server ramas agatat de porturi
+#     --fresh       inchide TOT, elibereaza porturile, apoi porneste de la zero
+#                   (acelasi lucru: comanda  agent-fresh )
 # ============================================================================
 set -uo pipefail
 
@@ -35,7 +38,7 @@ fi
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGENT_HOME="${AGENT_HOME:-/opt/agent}"
 
-WANT_30B=0; REINGEST=0; RUN_AGENT=1; ACTION=start; ONCE=""; SHOW=""
+WANT_30B=0; REINGEST=0; RUN_AGENT=1; ACTION=start; ONCE=""; SHOW=""; FRESH=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --model-30b) WANT_30B=1 ;;
@@ -43,9 +46,11 @@ while [ $# -gt 0 ]; do
     --no-agent)  RUN_AGENT=0 ;;
     --stop)      ACTION=stop ;;
     --status)    ACTION=status ;;
+    --kill-all)  ACTION=kill-all ;;
+    --fresh)     FRESH=1 ;;
     --show)      SHOW="--show" ;;
     --once)      shift; ONCE="$*"; break ;;
-    -h|--help)   sed -n '2,24p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,27p' "$0"; exit 0 ;;
     *) echo "Optiune necunoscuta: $1"; echo "Vezi:  agent --help"; exit 1 ;;
   esac
   shift
@@ -62,6 +67,62 @@ as_root() {
   else die "nu sunt root si nu am sudo. Ruleaza ca root: su - ; bash $0"
   fi
 }
+
+# ------------------------------------------------------------------- --fresh
+# Inchide tot ce a ramas pornit, asteapta sa se elibereze porturile, apoi
+# scriptul isi urmeaza cursul normal si porneste totul de la zero.
+# Nu depinde de nimic din ce e deja instalat: merge si daca /opt/agent e vechi.
+port_taken() {
+  local p="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn 2>/dev/null | grep -qE "[:.]${p}[[:space:]]" && return 0
+  fi
+  (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null
+}
+
+fresh_cleanup() {
+  local i p n
+  say "0/7  Inchid ce a ramas pornit"
+
+  n="$(pgrep -c -f llama-server 2>/dev/null || true)"
+  case "${n:-0}" in ''|*[!0-9]*) n=0 ;; esac
+  if [ "$n" -gt 0 ]; then
+    warn "$n proces(e) llama-server pornite - le opresc"
+    as_root pkill -f llama-server 2>/dev/null || true
+    for i in $(seq 1 15); do
+      pgrep -f llama-server >/dev/null 2>&1 || break
+      sleep 1
+    done
+    if pgrep -f llama-server >/dev/null 2>&1; then
+      warn "nu s-au oprit frumos, le opresc fortat"
+      as_root pkill -9 -f llama-server 2>/dev/null || true
+      sleep 2
+    fi
+  fi
+  if pgrep -f llama-server >/dev/null 2>&1; then
+    warn "au ramas procese llama-server pe care nu le pot opri (alt utilizator?)"
+  else
+    ok "niciun llama-server pornit"
+  fi
+
+  rm -f "$AGENT_HOME/logs/llm.pid" "$AGENT_HOME/logs/emb.pid"         "$AGENT_HOME/data/ports.env" 2>/dev/null
+
+  for p in "${LLM_PORT:-8080}" "${EMB_PORT:-8081}"; do
+    for i in $(seq 1 20); do
+      port_taken "$p" || break
+      sleep 1
+    done
+    if port_taken "$p"; then
+      warn "portul $p e ocupat de altceva - agentul va folosi automat alt port"
+    else
+      ok "portul $p: liber"
+    fi
+  done
+}
+
+if [ "$FRESH" = 1 ] && [ "$ACTION" = start ]; then
+  fresh_cleanup
+fi
 
 # ---------------------------------------------------------------- stop/status
 if [ "$ACTION" != start ]; then
@@ -170,6 +231,15 @@ else
   warn "nu am putut crea /usr/local/bin/agent (foloseste: bash $AGENT_HOME/bin/start.sh)"
 fi
 rm -f "/tmp/.agent-cmd.$$"
+
+# ... si o scurtatura pentru repornirea curata: inchide tot, apoi porneste.
+printf '#!/usr/bin/env bash
+exec bash %s/bin/start.sh --fresh "$@"
+' "$AGENT_HOME"   > "/tmp/.agent-fresh.$$"
+if as_root install -m 755 "/tmp/.agent-fresh.$$" /usr/local/bin/agent-fresh 2>/dev/null; then
+  ok "comanda globala: agent-fresh  (inchide tot, apoi porneste curat)"
+fi
+rm -f "/tmp/.agent-fresh.$$"
 ok "docs/pdf  docs/repos  docs/md  models  data  logs  bin"
 
 # ---------------------------------------------------------------- 3. llama.cpp

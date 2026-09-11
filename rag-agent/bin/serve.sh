@@ -41,6 +41,11 @@ port_pid() {
   if [ -z "$pid" ] && command -v fuser >/dev/null 2>&1; then
     pid="$(fuser -n tcp "$p" 2>/dev/null | tr -s ' ' '\n' | grep -E '^[0-9]+$' | head -1)"
   fi
+  # ss/fuser nu arata pid-ul proceselor altui utilizator fara root;
+  # ale noastre le gasim oricum dupa linia de comanda
+  if [ -z "$pid" ] && command -v pgrep >/dev/null 2>&1; then
+    pid="$(pgrep -f "llama-server.*--port[= ]$p" 2>/dev/null | head -1)"
+  fi
   echo "$pid"
 }
 
@@ -48,6 +53,37 @@ port_owner() {
   local pid; pid="$(port_pid "$1")"
   if [ -n "$pid" ]; then echo "$pid $(ps -o comm= -p "$pid" 2>/dev/null)"
   else echo "? necunoscut"; fi
+}
+
+# Asteapta pana portul chiar se elibereaza (un proces omorat nu moare instant).
+wait_port_free() {           # wait_port_free <port> [secunde]
+  local p="$1" n="${2:-20}" i
+  for i in $(seq 1 "$n"); do
+    port_busy "$p" || return 0
+    sleep 1
+  done
+  port_busy "$p" && return 1
+  return 0
+}
+
+# Elibereaza portul DOAR daca il tine un llama-server (al nostru).
+# 0 = portul e liber acum;  1 = il tine altcineva, nu ne atingem de el.
+kill_port() {                # kill_port <port>
+  local p="$1" pid cmd
+  port_busy "$p" || return 0
+  pid="$(port_pid "$p")"
+  [ -n "$pid" ] || return 1
+  cmd="$(ps -o comm= -p "$pid" 2>/dev/null)"
+  case "$cmd" in
+    llama-server*)
+      kill "$pid" 2>/dev/null
+      wait_port_free "$p" 15 && return 0
+      kill -9 "$pid" 2>/dev/null
+      wait_port_free "$p" 10 && return 0
+      return 1
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 free_port_from() {           # primul port liber incepand de la $1
@@ -65,9 +101,15 @@ show_log() {
   echo "    ----------------------------------------------------"
 }
 
+# Logul spune ca n-a putut lua portul? (apostroful difera intre versiuni)
+log_bind_error() {           # log_bind_error <nume>
+  grep -qi "couldn.t bind\|address already in use\|bind.*failed" \
+       "$AGENT_HOME/logs/$1.log" 2>/dev/null
+}
+
 # Decide pe ce port pornim. Ecou: portul de folosit. Cod 10 = deja e unul bun.
 prepare_port() {             # prepare_port <nume> <port>
-  local name="$1" port="$2" url="http://127.0.0.1:$2" code i pid cmd
+  local name="$1" port="$2" url="http://127.0.0.1:$2" code i
 
   code="$(http_code "$url/health")"
   if [ "$code" = "200" ]; then echo "$port"; return 10; fi
@@ -82,21 +124,13 @@ prepare_port() {             # prepare_port <nume> <port>
   fi
 
   if port_busy "$port"; then
-    pid="$(port_pid "$port")"
-    cmd="$(ps -o comm= -p "${pid:-0}" 2>/dev/null)"
-    case "$cmd" in
-      llama-server*)
-        echo "    $name: un llama-server vechi (pid $pid) tine portul $port, il opresc" >&2
-        kill "$pid" 2>/dev/null
-        for i in $(seq 1 15); do port_busy "$port" || break; sleep 1; done
-        port_busy "$port" && { kill -9 "$pid" 2>/dev/null; sleep 2; }
-        ;;
-      *)
-        local np; np="$(free_port_from $((port + 10)))"
-        echo "    $name: portul $port e ocupat de $(port_owner "$port"), trec pe $np" >&2
-        port="$np"
-        ;;
-    esac
+    if kill_port "$port"; then
+      echo "    $name: un llama-server vechi tinea portul $port, l-am oprit" >&2
+    else
+      local np; np="$(free_port_from $((port + 10)))"
+      echo "    $name: portul $port e ocupat de $(port_owner "$port"), trec pe $np" >&2
+      port="$np"
+    fi
   fi
   echo "$port"
   return 0
@@ -109,11 +143,35 @@ mlock_flag() {
   [ "$(ulimit -l 2>/dev/null)" = "unlimited" ] && echo "--mlock"
 }
 
+# Numele flagului de embeddings difera intre versiunile de llama.cpp.
+# Il citim O DATA din --help si il tinem minte.
+# Inainte incercam sa pornim serverul de 4 ori la rand ca sa ghicim flagul --
+# fiecare incercare esuata lasa procesul agatat de port, iar urmatoarele picau
+# toate cu "couldn't bind". De aici venea eroarea.
+emb_flags() {
+  local cache="$DATA_DIR/.emb_flags" h f=""
+  if [ -f "$cache" ] && [ "$cache" -nt "$LLAMA_BIN/llama-server" ] 2>/dev/null; then
+    cat "$cache"; return 0
+  fi
+  h="$("$LLAMA_BIN/llama-server" --help 2>&1 || true)"
+  case "$h" in
+    *--embeddings*) f="--embeddings" ;;
+    *--embedding*)  f="--embedding"  ;;
+  esac
+  case "$h" in *--pooling*) f="$f --pooling cls" ;; esac
+  mkdir -p "$DATA_DIR"
+  printf '%s' "$f" > "$cache" 2>/dev/null || true
+  printf '%s' "$f"
+}
+
 wait_up() {                  # wait_up <url> <pid>
-  local url="$1" pid="$2" i
+  local url="$1" pid="$2" p="${url##*:}" i
   for i in $(seq 1 600); do
     is_up "$url" && return 0
     if ! kill -0 "$pid" 2>/dev/null; then
+      # pid-ul pornit de noi poate fi doar un invelis care a iesit; daca portul
+      # raspunde 503, serverul real inca isi incarca modelul -> mai asteptam
+      if [ "$(http_code "$url/health")" = "503" ]; then sleep 1; continue; fi
       sleep 1; is_up "$url" && return 0
       return 1
     fi
@@ -124,18 +182,29 @@ wait_up() {                  # wait_up <url> <pid>
 
 try_launch() {               # try_launch <nume> <url> <pidfile> <flaguri...>
   local name="$1" url="$2" pidfile="$3"; shift 3
+  local p="${url##*:}"
   nohup setsid "$LLAMA_BIN/llama-server" "$@" \
     > "$AGENT_HOME/logs/$name.log" 2>&1 &
   local pid=$!
   echo "$pid" > "$pidfile"
-  if wait_up "$url" "$pid"; then echo "    $name: gata ($url)"; return 0; fi
-  kill "$pid" 2>/dev/null
-  rm -f "$pidfile"
-  # Daca a picat pe bind, nu are rost sa incercam alte flaguri
-  if grep -q "couldn't bind" "$AGENT_HOME/logs/$name.log" 2>/dev/null; then
-    return 2
+  if wait_up "$url" "$pid"; then
+    # in pidfile punem pid-ul care chiar asculta pe port, ca "stop" sa functioneze
+    local rp; rp="$(port_pid "$p")"
+    [ -n "$rp" ] && echo "$rp" > "$pidfile"
+    echo "    $name: gata ($url)"
+    return 0
   fi
-  return 1
+
+  # Curatenie obligatorie: altfel procesul ramane agatat de port si toate
+  # incercarile urmatoare pica pe bind.
+  kill "$pid" 2>/dev/null
+  sleep 1
+  kill -9 "$pid" 2>/dev/null
+  rm -f "$pidfile"
+  local rc=1
+  log_bind_error "$name" && rc=2
+  kill_port "$p" >/dev/null 2>&1
+  return $rc
 }
 
 # ---------------------------------------------------------------- servere
@@ -145,20 +214,46 @@ start_emb() {
   [ $rc -eq 10 ] && { echo "==> emb: deja pornit ($EMB_URL)"; return 0; }
 
   echo "==> Pornesc serverul de embeddings (port $EMB_PORT, CPU)"
+  local F; F="$(emb_flags)"
+  if [ -z "$F" ]; then
+    echo "    ! llama-server din $LLAMA_BIN nu are flag de embeddings (build prea vechi)"
+    return 1
+  fi
+  echo "    flaguri: $F"
+
   local base=(-m "$EMB_MODEL" --host 127.0.0.1 --port "$EMB_PORT"
               -c "$EMB_CTX" -b "$EMB_UBATCH" -ub "$EMB_UBATCH"
               -t "${EMB_THREADS:-$THREADS}" -ngl "$NGL")
-  # Numele flagului difera intre versiunile de llama.cpp -> incercam pe rand.
-  local v r
-  for v in "--embeddings --pooling cls" "--embeddings" \
-           "--embedding --pooling cls" "--embedding"; do
+  local r
+  # shellcheck disable=SC2086
+  try_launch emb "$EMB_URL" "$PID_EMB" "${base[@]}" $F; r=$?
+  [ $r -eq 0 ] && return 0
+
+  if [ $r -eq 2 ]; then
+    echo "    portul $EMB_PORT era inca ocupat, il eliberez si mai incerc o data"
+    kill_port "$EMB_PORT" >/dev/null 2>&1
+    if ! wait_port_free "$EMB_PORT" 20; then
+      echo "    ! portul $EMB_PORT e tinut de: $(port_owner "$EMB_PORT")"
+      show_log emb
+      return 1
+    fi
     # shellcheck disable=SC2086
-    try_launch emb "$EMB_URL" "$PID_EMB" "${base[@]}" $v
-    r=$?
-    [ $r -eq 0 ] && { echo "    (flaguri: $v)"; return 0; }
-    [ $r -eq 2 ] && { echo "    ! portul $EMB_PORT nu poate fi ocupat"; show_log emb; return 1; }
-    echo "    varianta '$v' nu a mers, incerc alta"
-  done
+    try_launch emb "$EMB_URL" "$PID_EMB" "${base[@]}" $F; r=$?
+    [ $r -eq 0 ] && return 0
+  fi
+
+  # Unele modele nu accepta pooling explicit -> o singura varianta de rezerva.
+  case "$F" in
+    *--pooling*)
+      local F2="${F%% --pooling*}"
+      echo "    incerc fara pooling explicit"
+      rm -f "$DATA_DIR/.emb_flags"
+      # shellcheck disable=SC2086
+      try_launch emb "$EMB_URL" "$PID_EMB" "${base[@]}" $F2; r=$?
+      if [ $r -eq 0 ]; then printf '%s' "$F2" > "$DATA_DIR/.emb_flags"; return 0; fi
+      ;;
+  esac
+
   show_log emb
   return 1
 }
@@ -178,7 +273,18 @@ start_llm() {
     try_launch llm "$LLM_URL" "$PID_LLM" "${base[@]}" $v
     r=$?
     [ $r -eq 0 ] && { [ -n "$v" ] && echo "    (flaguri extra:$v)"; return 0; }
-    [ $r -eq 2 ] && { echo "    ! portul $LLM_PORT nu poate fi ocupat"; show_log llm; return 1; }
+    if [ $r -eq 2 ]; then
+      echo "    portul $LLM_PORT era inca ocupat, il eliberez si mai incerc o data"
+      kill_port "$LLM_PORT" >/dev/null 2>&1
+      if ! wait_port_free "$LLM_PORT" 20; then
+        echo "    ! portul $LLM_PORT e tinut de: $(port_owner "$LLM_PORT")"
+        show_log llm
+        return 1
+      fi
+      # shellcheck disable=SC2086
+      try_launch llm "$LLM_URL" "$PID_LLM" "${base[@]}" $v; r=$?
+      [ $r -eq 0 ] && return 0
+    fi
     echo "    incerc cu mai putine flaguri"
   done
   show_log llm
@@ -210,15 +316,13 @@ start() {
 }
 
 stop() {
-  local f pid
+  local f p
   for f in "$PID_LLM" "$PID_EMB"; do
     [ -f "$f" ] && { kill "$(cat "$f")" 2>/dev/null; rm -f "$f"; }
   done
   # si orice llama-server ramas pe porturile noastre
   for p in "$LLM_PORT" "$EMB_PORT"; do
-    pid="$(port_pid "$p")"
-    [ -n "$pid" ] && [ "$(ps -o comm= -p "$pid" 2>/dev/null)" = "llama-server" ] \
-      && kill "$pid" 2>/dev/null
+    kill_port "$p" >/dev/null 2>&1
   done
   pkill -f "llama-server.*--port $LLM_PORT" 2>/dev/null
   pkill -f "llama-server.*--port $EMB_PORT" 2>/dev/null
@@ -226,8 +330,25 @@ stop() {
   echo "==> Oprit."
 }
 
+# Ultima solutie: opreste ORICE llama-server de pe masina si elibereaza porturile.
+kill_all() {
+  pkill -f llama-server 2>/dev/null
+  sleep 2
+  pkill -9 -f llama-server 2>/dev/null
+  rm -f "$PID_LLM" "$PID_EMB" "$PORTS_F"
+  echo "==> Toate procesele llama-server au fost oprite."
+  local p
+  for p in "$LLM_PORT" "$EMB_PORT"; do
+    if port_busy "$p"; then
+      echo "    atentie: portul $p e inca ocupat de: $(port_owner "$p")"
+    else
+      echo "    portul $p: liber"
+    fi
+  done
+}
+
 status() {
-  local c
+  local c n rest u p pair
   for pair in "llm:$LLM_URL:$LLM_PORT" "emb:$EMB_URL:$EMB_PORT"; do
     n="${pair%%:*}"; rest="${pair#*:}"; u="${rest%:*}"; p="${rest##*:}"
     c="$(http_code "$u/health")"
@@ -240,6 +361,7 @@ status() {
     esac
   done
   echo
+  echo "procese llama-server: $(pgrep -c -f llama-server 2>/dev/null || echo 0)"
   echo "model LLM: $LLM_MODEL"
   echo "model emb: $EMB_MODEL"
   echo "index:     $(tr -d '\n ' < "$DATA_DIR/manifest.json" 2>/dev/null || echo inexistent)"
@@ -248,9 +370,10 @@ status() {
 }
 
 case "${1:-start}" in
-  start)   start ;;
-  stop)    stop ;;
-  restart) stop; sleep 2; start ;;
-  status)  status ;;
-  *) echo "folosire: $0 {start|stop|restart|status}"; exit 1 ;;
+  start)    start ;;
+  stop)     stop ;;
+  kill-all) kill_all ;;
+  restart)  stop; sleep 2; start ;;
+  status)   status ;;
+  *) echo "folosire: $0 {start|stop|restart|status|kill-all}"; exit 1 ;;
 esac
