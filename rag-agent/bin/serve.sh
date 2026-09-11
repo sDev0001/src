@@ -107,20 +107,44 @@ log_bind_error() {           # log_bind_error <nume>
        "$AGENT_HOME/logs/$1.log" 2>/dev/null
 }
 
+# Asteapta ca un server sa termine de citit modelul de pe disc in RAM.
+# Afiseaza progresul -- altfel pare ca s-a blocat si omul da Ctrl+C degeaba.
+# 0 = gata;  1 = a murit intre timp;  2 = a trecut timpul maxim.
+wait_loading() {             # wait_loading <nume> <url> [secunde]
+  local name="$1" url="$2" max="${3:-${LOAD_TIMEOUT:-1800}}" i=0 c rc=2
+  printf '    %s: citeste modelul de pe disc (poate dura, max %d min)'          "$name" $((max / 60)) >&2
+  for i in $(seq 1 "$max"); do
+    c="$(http_code "$url/health")"
+    if [ "$c" = "200" ]; then rc=0; break; fi
+    if [ "$c" = "000" ]; then rc=1; break; fi
+    [ $((i % 10)) -eq 0 ] && printf '.' >&2
+    sleep 1
+  done
+  printf ' %d:%02d' $((i / 60)) $((i % 60)) >&2
+  echo >&2
+  return $rc
+}
+
 # Decide pe ce port pornim. Ecou: portul de folosit. Cod 10 = deja e unul bun.
 prepare_port() {             # prepare_port <nume> <port>
-  local name="$1" port="$2" url="http://127.0.0.1:$2" code i
+  local name="$1" port="$2" url="http://127.0.0.1:$2" code i w
 
   code="$(http_code "$url/health")"
   if [ "$code" = "200" ]; then echo "$port"; return 10; fi
 
   if [ "$code" = "503" ]; then
-    echo "    $name: exista deja pe $port si isi incarca modelul, astept..." >&2
-    for i in $(seq 1 300); do
-      sleep 1
-      is_up "$url" && { echo "$port"; return 10; }
-    done
-    echo "    $name: prea mult timp la incarcare, il inlocuiesc" >&2
+    # Exista deja un llama-server viu pe portul asta, dar inca isi urca modelul
+    # in RAM. NU pornim altul (ar fi doua modele in RAM si s-ar bate pe port):
+    # asteptam sa fie gata si il refolosim asa cum e.
+    echo "    $name: exista deja un server pe $port care isi incarca modelul in RAM" >&2
+    wait_loading "$name" "$url"
+    w=$?
+    case "$w" in
+      0) echo "    $name: s-a incarcat, il refolosesc (nu mai pornesc altul)" >&2
+         echo "$port"; return 10 ;;
+      1) echo "    $name: a murit in timpul incarcarii, pornesc altul" >&2 ;;
+      *) echo "    $name: nu s-a incarcat in $((${LOAD_TIMEOUT:-1800} / 60)) minute, il inlocuiesc" >&2 ;;
+    esac
   fi
 
   if port_busy "$port"; then
