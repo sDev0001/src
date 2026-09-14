@@ -1,0 +1,68 @@
+# Agent RAG local, in container. CPU only, fara GPU.
+#
+#   docker compose run --rm agent      <- porneste tot si te lasa in prompt
+#   docker compose down                <- opreste tot
+#
+# Nu se publica NICIUN port catre exterior. Serverul LLM e vizibil doar din
+# celalalt container, pe reteaua interna a lui docker. Din afara masinii nu se
+# poate ajunge la el si nu ai nevoie de browser sau de interfata grafica.
+#
+# Ce reglezi e in fisierul .env de langa acest fisier.
+
+name: rag-agent
+
+services:
+
+  # Tine modelul incarcat in RAM. Ramane pornit intre intrebari.
+  llm:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: rag-agent:latest
+    restart: unless-stopped
+    volumes:
+      - ${MODELS_DIR:-./models}:/models:ro
+    command:
+      - llama-server
+      - -m
+      - /models/${LLM_MODEL_FILE}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - -c
+      - "${CTX:-8192}"
+      - -t
+      - "${THREADS:-4}"
+      - -tb
+      - "${THREADS:-4}"
+      - -ngl
+      - "0"
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 180        # pana la 30 de minute pentru modelele mari
+      start_period: 20s
+
+  # Citeste documentele, cauta in ele, intreaba modelul. Porneste la cerere.
+  agent:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: rag-agent:latest
+    depends_on:
+      llm:
+        condition: service_healthy
+    volumes:
+      - ${DOCS_DIR:-./docs}:/docs:ro
+      - ./data:/agent/data
+    environment:
+      LLM_URL: http://llm:8080
+      USE_EMBEDDINGS: "0"
+      TOP_K: "${TOP_K:-8}"
+      MAX_TOKENS: "${MAX_TOKENS:-1024}"
+      OCR_LANGS: "${OCR_LANGS:-ron+eng+rus}"
+    stdin_open: true
+    tty: true
+    entrypoint: ["/app/entrypoint-agent.sh"]
