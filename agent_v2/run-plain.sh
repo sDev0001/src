@@ -86,7 +86,7 @@ if [ "$("$DK" inspect -f '{{.State.Running}}' "$LLM" 2>/dev/null)" != "true" ]; 
   echo "    model:   $LLM_MODEL_FILE"
   echo "    threads: $THREADS (CPU, fara GPU)"
   "$DK" run -d --name "$LLM" --network "$NET" --restart unless-stopped \
-    -v "$MODELS_DIR:/models:ro" "$IMG" \
+    -v "$MODELS_DIR:/models:ro,z" "$IMG" \
     llama-server -m "/models/$LLM_MODEL_FILE" \
       --host 0.0.0.0 --port 8080 \
       -c "$CTX" -t "$THREADS" -tb "$THREADS" -ngl 0 >/dev/null || {
@@ -97,8 +97,8 @@ fi
 
 # ---------------------------------------------------------------- agentul
 "$DK" run --rm -it --network "$NET" \
-  -v "$DOCS_DIR:/docs:ro" \
-  -v "$PWD/data:/agent/data" \
+  -v "$DOCS_DIR:/docs:ro,z" \
+  -v "$PWD/data:/agent/data:z" \
   -e "LLM_URL=http://$LLM:8080" \
   -e "USE_EMBEDDINGS=${USE_EMBEDDINGS:-0}" \
   -e "DOC_MIN_SCORE=${DOC_MIN_SCORE:-0.5}" \

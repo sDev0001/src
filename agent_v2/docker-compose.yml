@@ -21,7 +21,7 @@ services:
     image: rag-agent:latest
     restart: unless-stopped
     volumes:
-      - ${MODELS_DIR:-./models}:/models:ro
+      - ${MODELS_DIR:-./models}:/models:ro,z
     command:
       - llama-server
       - -m
@@ -55,8 +55,8 @@ services:
       llm:
         condition: service_healthy
     volumes:
-      - ${DOCS_DIR:-./docs}:/docs:ro
-      - ./data:/agent/data
+      - ${DOCS_DIR:-./docs}:/docs:ro,z
+      - ./data:/agent/data:z
     environment:
       LLM_URL: http://llm:8080
       USE_EMBEDDINGS: "0"
