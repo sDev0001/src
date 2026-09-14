@@ -8,7 +8,13 @@ Ruleaza dupa ce ai pornit serverele:  bin/serve.sh start && bin/ingest.py
 import os, re, sys, json, time, hashlib, shutil, subprocess, tempfile
 import urllib.request
 
-import numpy as np
+USE_EMB = os.environ.get("USE_EMBEDDINGS", "0") == "1"
+try:
+    import numpy as np
+except ImportError:
+    np = None
+    if USE_EMB:
+        sys.exit("Pentru cautarea semantica e nevoie de numpy.")
 
 if sys.version_info < (3, 7):
     sys.exit("Nevoie de Python 3.7+. Ruleaza:  dnf install python3.11")
@@ -30,10 +36,21 @@ OVERLAP    = int(os.environ.get("CHUNK_OVERLAP", 180))
 BATCH      = int(os.environ.get("EMB_BATCH", 16))
 OCR_LANGS  = os.environ.get("OCR_LANGS", "ron+eng+rus")
 
-TEXT_EXT = {".md", ".markdown", ".txt", ".rst", ".adoc", ".org",
-            ".py", ".js", ".ts", ".go", ".java", ".sh", ".sql",
-            ".yaml", ".yml", ".toml", ".ini", ".conf", ".json"}
+# Citim ORICE fisier care contine text. Nu mai tinem o lista de extensii
+# permise, ci doar lista celor care sigur NU sunt text.
 HTML_EXT = {".html", ".htm", ".xhtml"}
+BINARY_EXT = {
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp", ".ico",
+    ".mp3", ".mp4", ".wav", ".avi", ".mkv", ".mov", ".flac", ".ogg", ".webm",
+    ".zip", ".gz", ".bz2", ".xz", ".7z", ".rar", ".tar", ".tgz", ".jar",
+    ".exe", ".dll", ".so", ".dylib", ".bin", ".o", ".a", ".class", ".pyc",
+    ".ttf", ".otf", ".woff", ".woff2", ".eot",
+    ".db", ".sqlite", ".sqlite3", ".gguf", ".npy", ".pt", ".onnx",
+    ".safetensors", ".iso", ".img", ".dmg", ".deb", ".rpm",
+    # Office = arhive zip, nu text simplu (nu le putem citi asa)
+    ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp",
+    ".doc", ".xls", ".ppt",
+}
 SKIP_DIR = {".git", "node_modules", "__pycache__", ".venv", "venv",
             "dist", "build", ".next", "target", ".idea", ".cache"}
 MAX_FILE_MB = 25
@@ -105,15 +122,33 @@ def extract_text(path):
     return [("", open(path, encoding="utf-8", errors="replace").read())]
 
 
+def looks_binary(path):
+    """Binar = are octet zero in primii 8 KB, sau prea multi octeti ciudati."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(8192)
+    except OSError:
+        return True
+    if not head:
+        return True
+    if bytes([0]) in head:
+        return True
+    printable = bytearray({7, 8, 9, 10, 12, 13, 27} | set(range(32, 256)))
+    return len(head.translate(None, printable)) > len(head) * 0.15
+
+
 def extract(path):
+    """PDF prin pdftotext, HTML fara taguri, ORICE altceva ca text simplu."""
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pdf":
         return extract_pdf(path)
+    if ext in BINARY_EXT:
+        return []
     if ext in HTML_EXT:
         return extract_html(path)
-    if ext in TEXT_EXT:
-        return extract_text(path)
-    return []
+    if looks_binary(path):
+        return []
+    return extract_text(path)
 
 
 # ------------------------------------------------------------------ chunking
@@ -148,7 +183,12 @@ def split_chunks(text):
             cur += "\n\n" + p
     if cur.strip():
         out.append(cur.strip())
-    return [c for c in out if len(c) > 60]
+    out = [c for c in out if len(c) > 25]
+    if not out and text:
+        # Fisier scurt (o nota, un fisier de configurare): il luam intreg.
+        # Altfel ar disparea din index fara ca nimeni sa observe.
+        out = [text]
+    return out
 
 
 def chunk_id(path, loc, text):
@@ -209,8 +249,9 @@ def walk_files():
                        if d not in SKIP_DIR and not d.startswith(".")]
             for f in sorted(files):
                 p = os.path.join(root, f)
-                ext = os.path.splitext(f)[1].lower()
-                if ext != ".pdf" and ext not in TEXT_EXT and ext not in HTML_EXT:
+                if f.startswith("."):
+                    continue
+                if os.path.splitext(f)[1].lower() in BINARY_EXT:
                     continue
                 try:
                     if os.path.getsize(p) > MAX_FILE_MB * 1024 * 1024:
@@ -228,17 +269,20 @@ def walk_files():
 def main():
     os.makedirs(DATA, exist_ok=True)
 
-    try:
-        urllib.request.urlopen(EMB_URL + "/health", timeout=5).read()
-    except Exception:
-        log("EROARE: serverul de embeddings nu raspunde la " + EMB_URL)
-        log("        porneste-l intai:  bin/serve.sh start")
-        sys.exit(1)
-
-    old_vecs = load_previous()
+    if USE_EMB:
+        try:
+            urllib.request.urlopen(EMB_URL + "/health", timeout=5).read()
+        except Exception:
+            log("EROARE: serverul de embeddings nu raspunde la " + EMB_URL)
+            log("        porneste-l intai:  bin/serve.sh start")
+            sys.exit(1)
+        old_vecs = load_previous()
+    else:
+        old_vecs = {}
     files = list(walk_files())
     if not files:
-        log("Nu am gasit niciun document in: " + ", ".join(DOCS_DIRS))
+        log("Nu am gasit niciun fisier in: " + ", ".join(DOCS_DIRS))
+        log("Arata-mi alta mapa cu:  agent --docs /calea/ta")
         sys.exit(1)
     log("==> %d fisiere de procesat\n" % len(files))
 
@@ -256,7 +300,10 @@ def main():
                 chunks.append({"id": chunk_id(path, loc, c),
                                "path": path, "loc": loc, "text": c})
                 cnt += 1
-        log("    %d chunk-uri" % cnt)
+        if cnt:
+            log("    %d fragmente" % cnt)
+        else:
+            log("    (sarit: nu am gasit text in el)")
 
     # deduplicare (acelasi text aparut in doua locuri)
     uniq, seen = [], set()
@@ -267,58 +314,69 @@ def main():
         uniq.append(c)
     chunks = uniq
 
-    todo = [c for c in chunks if c["id"] not in old_vecs]
-    log("\n==> %d chunk-uri total, %d noi de embedat" % (len(chunks), len(todo)))
+    if not USE_EMB:
+        # Cautare doar pe cuvinte: nu ne trebuie vectori, deci nici al doilea
+        # server si niciun model in plus. Scriem direct fragmentele.
+        keep, emb, dim = chunks, None, 0
+        log("")
+        log("==> %d fragmente (cautare pe cuvinte)" % len(keep))
+    else:
+        todo = [c for c in chunks if c["id"] not in old_vecs]
+        log("")
+        log("==> %d fragmente total, %d noi de embedat" % (len(chunks), len(todo)))
 
-    new_vecs = {}
-    t0 = time.time()
-    for i in range(0, len(todo), BATCH):
-        batch = todo[i:i + BATCH]
-        vecs = embed([c["text"] for c in batch])
-        for c, v in zip(batch, vecs):
-            new_vecs[c["id"]] = np.asarray(v, dtype=np.float32)
-        done = min(i + BATCH, len(todo))
-        el = time.time() - t0
-        eta = el / max(done, 1) * (len(todo) - done)
-        log("    embed %d/%d  (~%.1f min ramase)" % (done, len(todo), eta / 60))
+        new_vecs = {}
+        t0 = time.time()
+        for i in range(0, len(todo), BATCH):
+            batch = todo[i:i + BATCH]
+            vecs = embed([c["text"] for c in batch])
+            for c, v in zip(batch, vecs):
+                new_vecs[c["id"]] = np.asarray(v, dtype=np.float32)
+            done = min(i + BATCH, len(todo))
+            el = time.time() - t0
+            eta = el / max(done, 1) * (len(todo) - done)
+            log("    embed %d/%d  (~%.1f min ramase)" % (done, len(todo), eta / 60))
 
-    dim = None
-    for src in (new_vecs, old_vecs):
-        if src:
-            dim = len(next(iter(src.values())))
-            break
-    if dim is None:
-        log("Nimic de indexat.")
-        sys.exit(1)
+        dim = None
+        for src in (new_vecs, old_vecs):
+            if src:
+                dim = len(next(iter(src.values())))
+                break
+        if dim is None:
+            log("Nimic de indexat.")
+            sys.exit(1)
 
-    mat, keep = [], []
-    for c in chunks:
-        v = new_vecs.get(c["id"])
-        if v is None:
-            v = old_vecs.get(c["id"])
-        if v is None or len(v) != dim:
-            continue
-        keep.append(c)
-        mat.append(v)
+        mat, keep = [], []
+        for c in chunks:
+            v = new_vecs.get(c["id"])
+            if v is None:
+                v = old_vecs.get(c["id"])
+            if v is None or len(v) != dim:
+                continue
+            keep.append(c)
+            mat.append(v)
 
-    emb = normalize(np.vstack(mat))
+        emb = normalize(np.vstack(mat))
 
     tmp_c = CHUNKS_F + ".tmp"
     tmp_e = EMB_F + ".tmp"
     with open(tmp_c, "w", encoding="utf-8") as f:
         for c in keep:
             f.write(json.dumps(c, ensure_ascii=False) + "\n")
-    np.save(tmp_e, emb)
     os.replace(tmp_c, CHUNKS_F)
-    os.replace(tmp_e + ".npy", EMB_F)
+    if emb is not None:
+        np.save(tmp_e, emb)
+        os.replace(tmp_e + ".npy", EMB_F)
+    elif os.path.exists(EMB_F):
+        os.remove(EMB_F)
 
     json.dump({"built": time.strftime("%Y-%m-%d %H:%M:%S"),
                "files": len(files), "chunks": len(keep), "dim": int(dim)},
               open(MANIFEST_F, "w"), indent=2)
 
-    log("\n==> GATA: %d chunk-uri, dim=%d" % (len(keep), dim))
+    log("")
+    log("==> GATA: %d fragmente indexate din %d fisiere" % (len(keep), len(files)))
     log("    " + CHUNKS_F)
-    log("    " + EMB_F)
 
 
 if __name__ == "__main__":

@@ -21,7 +21,10 @@
 #     --once "..."  o singura intrebare, non-interactiv (pentru scripturi)
 #     --stop        opreste serverele
 #     --status      arata ce ruleaza, ce model, cate fragmente are indexul
+#     --docs CALE   arata-i mapa cu documentele (o tine minte de atunci)
 #     --kill-all    opreste FORTAT orice llama-server ramas agatat de porturi
+#     --semantic    porneste si cautarea semantica (al doilea server, 600 MB)
+#     --no-semantic revine la cautarea pe cuvinte (implicit, un singur server)
 #     --fresh       inchide TOT, elibereaza porturile, apoi porneste de la zero
 #                   (acelasi lucru: comanda  agent-fresh )
 # ============================================================================
@@ -38,7 +41,18 @@ fi
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGENT_HOME="${AGENT_HOME:-/opt/agent}"
 
+# Setarile memorate de la rularea trecuta (mapa cu documente, tipul de cautare)
+if [ -z "${DOCS_DIR:-}" ] && [ -f "$AGENT_HOME/data/docs_dir" ]; then
+  DOCS_DIR="$(cat "$AGENT_HOME/data/docs_dir" 2>/dev/null)"
+fi
+if [ -z "${USE_EMBEDDINGS:-}" ] && [ -f "$AGENT_HOME/data/use_emb" ]; then
+  USE_EMBEDDINGS="$(cat "$AGENT_HOME/data/use_emb" 2>/dev/null)"
+fi
+export DOCS_DIR="${DOCS_DIR:-$AGENT_HOME/docs}"
+export USE_EMBEDDINGS="${USE_EMBEDDINGS:-0}"
+
 WANT_30B=0; REINGEST=0; RUN_AGENT=1; ACTION=start; ONCE=""; SHOW=""; FRESH=0
+DOCS_SET=""; SEMANTIC=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --model-30b) WANT_30B=1 ;;
@@ -48,9 +62,12 @@ while [ $# -gt 0 ]; do
     --status)    ACTION=status ;;
     --kill-all)  ACTION=kill-all ;;
     --fresh)     FRESH=1 ;;
+    --docs)      shift; DOCS_SET="${1:-}" ;;
+    --semantic)    SEMANTIC=1 ;;
+    --no-semantic) SEMANTIC=0 ;;
     --show)      SHOW="--show" ;;
     --once)      shift; ONCE="$*"; break ;;
-    -h|--help)   sed -n '2,27p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,30p' "$0"; exit 0 ;;
     *) echo "Optiune necunoscuta: $1"; echo "Vezi:  agent --help"; exit 1 ;;
   esac
   shift
@@ -240,7 +257,23 @@ if as_root install -m 755 "/tmp/.agent-fresh.$$" /usr/local/bin/agent-fresh 2>/d
   ok "comanda globala: agent-fresh  (inchide tot, apoi porneste curat)"
 fi
 rm -f "/tmp/.agent-fresh.$$"
-ok "docs/pdf  docs/repos  docs/md  models  data  logs  bin"
+# --- mapa cu documentele si tipul de cautare ---------------------
+if [ -n "$DOCS_SET" ]; then
+  [ -d "$DOCS_SET" ] || die "mapa nu exista: $DOCS_SET"
+  DOCS_DIR="$(cd "$DOCS_SET" && pwd)"
+  echo "$DOCS_DIR" > "$AGENT_HOME/data/docs_dir"
+  export DOCS_DIR
+fi
+if [ -n "$SEMANTIC" ]; then
+  echo "$SEMANTIC" > "$AGENT_HOME/data/use_emb"
+  export USE_EMBEDDINGS="$SEMANTIC"
+fi
+ok "documente: $DOCS_DIR"
+if [ "$USE_EMBEDDINGS" = 1 ]; then
+  ok "cautare:   pe cuvinte + semantica (doua servere)"
+else
+  ok "cautare:   pe cuvinte (un singur server)"
+fi
 
 # ---------------------------------------------------------------- 3. llama.cpp
 say "3/7  llama.cpp (build CPU, fara GPU)"
@@ -306,19 +339,18 @@ fetch() {  # fetch <destinatie> <url> [url-alternativ ...]
   return 1
 }
 
-# 4a. embeddings -- obligatoriu, dar mic (~600 MB)
-EMB_MODEL="$(ls -1 "$MODELS"/*bge-m3*.gguf 2>/dev/null | head -1)"
-if [ -z "$EMB_MODEL" ]; then
-  fetch "$MODELS/bge-m3-Q8_0.gguf" \
-    "https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q8_0.gguf" \
-    "https://huggingface.co/lm-kit/bge-m3-gguf/resolve/main/bge-m3-Q8_0.gguf" \
-    || die "nu am putut descarca modelul de embeddings.
-        Cauta pe huggingface.co 'bge-m3 GGUF', ia fisierul Q8_0,
-        pune-l in $MODELS/ si ruleaza din nou: sudo bash start.sh"
-  EMB_MODEL="$MODELS/bge-m3-Q8_0.gguf"
+# 4a. embeddings -- doar daca ai cerut cautare semantica (agent --semantic)
+if [ "$USE_EMBEDDINGS" = 1 ]; then
+  EMB_MODEL="$(ls -1 "$MODELS"/*bge-m3*.gguf 2>/dev/null | head -1)"
+  if [ -z "$EMB_MODEL" ]; then
+    fetch "$MODELS/bge-m3-Q8_0.gguf" "https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q8_0.gguf" "https://huggingface.co/lm-kit/bge-m3-gguf/resolve/main/bge-m3-Q8_0.gguf" || die "nu am putut descarca modelul de embeddings. Ia-l manual de pe huggingface (cauta: bge-m3 GGUF, fisierul Q8_0), pune-l in $MODELS/ si ruleaza din nou. Sau lasa cautarea pe cuvinte: agent --no-semantic"
+    EMB_MODEL="$MODELS/bge-m3-Q8_0.gguf"
+  fi
+  export EMB_MODEL
+  ok "embeddings: $(basename "$EMB_MODEL")"
+else
+  ok "embeddings: nefolosite (cautare pe cuvinte)"
 fi
-export EMB_MODEL
-ok "embeddings: $(basename "$EMB_MODEL")"
 
 # 4b. LLM -- foloseste ce ai deja; descarca doar la cerere sau daca n-ai nimic
 find_llm() {
@@ -365,26 +397,22 @@ source "$AGENT_HOME/config.env"
 
 # ---------------------------------------------------------------- 6. documente
 say "6/7  Documente"
-NDOCS="$(find "$AGENT_HOME/docs" -type f \
-         \( -name '*.pdf' -o -name '*.md' -o -name '*.txt' -o -name '*.html' \
-            -o -name '*.rst' -o -name '*.py' -o -name '*.yaml' -o -name '*.yml' \) \
-         2>/dev/null | wc -l)"
+NDOCS="$(find "$DOCS_DIR" -type f 2>/dev/null | wc -l)"
 if [ "$NDOCS" -eq 0 ]; then
   cat <<TXT
 
-    Nu ai inca niciun document. Pune-le si ruleaza din nou:  sudo bash start.sh
+    Nu am gasit niciun fisier in:  $DOCS_DIR
 
-        cp /calea/ta/*.pdf   $AGENT_HOME/docs/pdf/
-        cd $AGENT_HOME/docs/repos && git clone <url-documentatie>
-        cp notite.md         $AGENT_HOME/docs/md/
+    Ori pui documentele acolo:
 
-    Serverele raman pornite in RAM.
+        cp -r /calea/ta/documente/*  $DOCS_DIR/
 
-    Dupa ce pui documentele, o SINGURA comanda, de oriunde:
+    ori imi arati direct mapa ta (o tin minte de atunci inainte):
 
-        agent
+        agent --docs /calea/ta/documente
 
-    (oprire completa:  agent --stop )
+    Citesc PDF, text, markdown, HTML, cod - practic orice fisier care are text
+    in el, din toate subfolderele. Serverul ramane pornit in RAM.
 TXT
   exit 0
 fi
@@ -397,7 +425,7 @@ if [ "$REINGEST" = 1 ]; then
 fi
 if [ ! -s "$IDX" ]; then
   "$PY" "$AGENT_HOME/bin/ingest.py" || die "indexarea a esuat"
-elif [ -n "$(find "$AGENT_HOME/docs" -type f -newer "$IDX" -print -quit 2>/dev/null)" ]; then
+elif [ -n "$(find "$DOCS_DIR" -type f -newer "$IDX" -print -quit 2>/dev/null)" ]; then
   ok "documente noi -> reindexez doar ce s-a schimbat"
   "$PY" "$AGENT_HOME/bin/ingest.py" || die "indexarea a esuat"
 else

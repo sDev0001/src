@@ -330,10 +330,16 @@ start() {
   local bad=0
   [ -x "$LLAMA_BIN/llama-server" ] || { echo "! lipseste $LLAMA_BIN/llama-server"; bad=1; }
   [ -f "$LLM_MODEL" ] || { echo "! lipseste modelul: $LLM_MODEL"; bad=1; }
-  [ -f "$EMB_MODEL" ] || { echo "! lipseste modelul: $EMB_MODEL"; bad=1; }
+  if [ "${USE_EMBEDDINGS:-0}" = "1" ]; then
+    [ -f "$EMB_MODEL" ] || { echo "! lipseste modelul: $EMB_MODEL"; bad=1; }
+  fi
   [ "$bad" = 0 ] || return 1
 
-  start_emb || { echo "! serverul de embeddings NU a pornit"; return 1; }
+  if [ "${USE_EMBEDDINGS:-0}" = "1" ]; then
+    start_emb || { echo "! serverul de embeddings NU a pornit"; return 1; }
+  else
+    echo "==> emb: oprit din configuratie (cautare pe cuvinte, un singur server)"
+  fi
   start_llm || { echo "! serverul LLM NU a pornit"; return 1; }
   save_ports
   return 0
@@ -372,8 +378,10 @@ kill_all() {
 }
 
 status() {
-  local c n rest u p pair
-  for pair in "llm:$LLM_URL:$LLM_PORT" "emb:$EMB_URL:$EMB_PORT"; do
+  local c n rest u p pair list
+  list="llm:$LLM_URL:$LLM_PORT"
+  [ "${USE_EMBEDDINGS:-0}" = "1" ] && list="$list emb:$EMB_URL:$EMB_PORT"
+  for pair in $list; do
     n="${pair%%:*}"; rest="${pair#*:}"; u="${rest%:*}"; p="${rest##*:}"
     c="$(http_code "$u/health")"
     case "$c" in
@@ -387,7 +395,12 @@ status() {
   echo
   echo "procese llama-server: $(pgrep -c -f llama-server 2>/dev/null || echo 0)"
   echo "model LLM: $LLM_MODEL"
-  echo "model emb: $EMB_MODEL"
+  echo "documente: $DOCS_DIR"
+  if [ "${USE_EMBEDDINGS:-0}" = "1" ]; then
+    echo "model emb: $EMB_MODEL"
+  else
+    echo "cautare:   pe cuvinte (fara al doilea server)"
+  fi
   echo "index:     $(tr -d '\n ' < "$DATA_DIR/manifest.json" 2>/dev/null || echo inexistent)"
   echo
   free -g

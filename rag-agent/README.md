@@ -92,30 +92,43 @@ tmux new -A -s agent
 6. pornește serverele
 7. indexează documentele și te lasă în prompt
 
-## De ce sunt două servere și un port
+## `127.0.0.1:8080` nu e o pagină web
 
-Nu vorbești tu cu portul — e cablul intern dintre două programe de pe același
-server:
+Nu ai nevoie de browser, de interfață grafică sau de rețea. `127.0.0.1` e
+adresa mașinii însăși — două programe de pe același server își vorbesc prin ea,
+ca printr-o țeavă internă. Din afară nu e accesibilă deloc.
 
 ```
      tu, în consolă
           │
-     agent.py  ──── caută în index ────►  chunks.jsonl + emb.npy
+     agent.py  ──── caută în index ────►  chunks.jsonl
           │
-          ├──► 127.0.0.1:8081   llama-server cu bge-m3   (căutare semantică)
-          └──► 127.0.0.1:8080   llama-server cu Qwen3    (scrie răspunsul)
+          └──► 127.0.0.1:8080   llama-server cu modelul   (scrie răspunsul)
 ```
 
-Cele două `llama-server` stau pornite ca să țină modelele **încărcate în RAM**.
-Asta era exact problema cu `llama-cli`: reîncărca 9 GB de pe disc la fiecare
-întrebare. `127.0.0.1` înseamnă că porturile sunt accesibile doar de pe server —
-nu sunt expuse în rețea, nu ai nevoie de firewall.
+**De ce e nevoie de „server" deloc:** ca modelul să rămână **încărcat în RAM**
+între întrebări. Alternativa (`llama-cli`) recitește 18 GB de pe disc la fiecare
+întrebare. Deci serverul e un truc ca să fie rapid, nu o interfață web.
 
-Dacă unul din ele cade, `agent` îl repornește singur. `serve.sh` încearcă mai
-multe variante de flaguri (`--embeddings` / `--embedding`, cu și fără
-`--pooling cls`, cu și fără `--mlock`), pentru că numele diferă între versiunile
-de llama.cpp. Dacă tot nu pornește, îți arată automat ultimele 20 de linii din
-log în loc să tacă.
+Tu vorbești doar cu promptul din consolă. Portul e instalație internă pe care nu
+o atingi niciodată.
+
+## Un singur server, implicit
+
+Căutarea în documente se face pe cuvinte (BM25), care nu are nevoie de niciun
+model. Deci pornește **un singur** `llama-server` — cel care scrie răspunsul.
+Mai puține lucruri care pot pica.
+
+Dacă vrei și căutare semantică (găsește și când întrebi cu alte cuvinte decât
+scrie în document — „numărul de serie" vs „serial"), o pornești oricând:
+
+```bash
+agent --semantic      # descarcă bge-m3 (600 MB), pornește al doilea server
+agent --no-semantic   # înapoi la un singur server
+```
+
+Setarea se ține minte. Cu căutarea pe cuvinte găsește bine termenii exacți:
+coduri de eroare, nume de funcții, denumiri de produs, cifre.
 
 ## Docker nu e folosit
 
@@ -124,15 +137,36 @@ folosească instrucțiunile AVX ale procesorului. Într-un container ai pierde
 exact asta și inferența ar fi mai lentă. Nu instalez și nu pornesc Docker; dacă
 îl ai deja, scriptul îți spune că e ignorat.
 
-## Unde pui documentele
+## Cum îi arăți documentele
 
-```
-/opt/agent/docs/pdf/     PDF-urile         cp *.pdf /opt/agent/docs/pdf/
-/opt/agent/docs/repos/   git clone aici    cd /opt/agent/docs/repos && git clone <url>
-/opt/agent/docs/md/      markdown, txt, cod
+O singură mapă. Îi spui unde e, o dată:
+
+```bash
+agent --docs /calea/ta/documentatie
 ```
 
-După ce adaugi ceva: `agent` din nou (re-indexează doar ce e nou).
+O ține minte de atunci înainte — de acum scrii doar `agent`.
+
+Nu contează cum e organizată înăuntru: intră în toate subfolderele. Citește
+**orice fișier care are text în el**:
+
+| | |
+|---|---|
+| PDF | prin `pdftotext`, cu OCR automat dacă e scanat |
+| text | `.txt` `.md` `.rst` `.log` `.csv` și orice altă extensie |
+| HTML | fără taguri |
+| cod | `.js` `.py` `.sql` `.sh` `.yaml` `.json` `.conf` — orice |
+| fără extensie | `README`, `Makefile`, `Dockerfile` — le citește |
+
+Sare peste ce sigur nu e text: imagini, arhive, video, executabile. Le detectează
+și după conținut, nu doar după extensie.
+
+**Word și Excel nu sunt citite** (`.docx`, `.xlsx` sunt arhive zip). Dacă ai
+așa ceva, salvează ca PDF sau text.
+
+După ce adaugi fișiere noi: `agent` din nou — reindexează doar ce s-a schimbat.
+
+---
 
 ---
 

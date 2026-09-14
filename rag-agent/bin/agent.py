@@ -13,7 +13,10 @@ Folosire:
 import os, re, sys, json, math, unicodedata
 import urllib.request
 
-import numpy as np
+try:
+    import numpy as np
+except ImportError:
+    np = None
 
 if sys.version_info < (3, 7):
     sys.exit("Nevoie de Python 3.7+. Ruleaza:  dnf install python3.11")
@@ -33,6 +36,7 @@ except Exception:
 H         = os.environ.get("AGENT_HOME", "/opt/agent")
 DATA      = os.environ.get("DATA_DIR", H + "/data")
 EMB_URL   = os.environ.get("EMB_URL", "http://127.0.0.1:8081")
+USE_EMB   = os.environ.get("USE_EMBEDDINGS", "0") == "1" and np is not None
 LLM_URL   = os.environ.get("LLM_URL", "http://127.0.0.1:8080")
 TOP_K     = int(os.environ.get("TOP_K", 8))
 CAND_K    = int(os.environ.get("CAND_K", 40))
@@ -88,45 +92,89 @@ def tokenize(s):
             if t not in STOP_RO and len(t.strip(".-")) > 1]
 
 
+STEM_LEN = 5
+
+
+def stem(t):
+    """Taiem coada cuvantului. In romana articolul se lipeste la sfarsit
+    (garantie / garantia / garantii), deci primele litere sunt partea stabila."""
+    return t[:STEM_LEN] if len(t) > STEM_LEN else t
+
+
 # ------------------------------------------------------------------ index
 class Index:
     def __init__(self):
-        if not (os.path.exists(CHUNKS_F) and os.path.exists(EMB_F)):
+        if not os.path.exists(CHUNKS_F):
             die("indexul lipseste. Ruleaza intai:  bin/ingest.py")
         self.chunks = [json.loads(l) for l in open(CHUNKS_F, encoding="utf-8") if l.strip()]
-        self.emb = np.load(EMB_F).astype(np.float32)
-        if len(self.chunks) != self.emb.shape[0]:
-            die("index inconsistent. Sterge %s si %s si ruleaza din nou ingest.py"
-                % (CHUNKS_F, EMB_F))
+        self.emb = None
+        if USE_EMB and os.path.exists(EMB_F):
+            self.emb = np.load(EMB_F).astype(np.float32)
+            if len(self.chunks) != self.emb.shape[0]:
+                die("index inconsistent. Sterge %s si %s si ruleaza din nou ingest.py"
+                    % (CHUNKS_F, EMB_F))
         self._build_bm25()
-        log("==> index: %d chunk-uri, dim=%d" % (len(self.chunks), self.emb.shape[1]))
+        if self.emb is None:
+            log("==> index: %d fragmente (cautare pe cuvinte)" % len(self.chunks))
+        else:
+            log("==> index: %d fragmente, dim=%d"
+                % (len(self.chunks), self.emb.shape[1]))
 
     def _build_bm25(self):
         self.docs = [tokenize(c["text"]) for c in self.chunks]
-        self.dl = np.array([len(d) for d in self.docs], dtype=np.float32)
-        self.avgdl = float(self.dl.mean()) if len(self.dl) else 1.0
+        self.dl = [float(len(d)) for d in self.docs]
+        self.avgdl = (sum(self.dl) / len(self.dl)) if self.dl else 1.0
         self.postings = {}
+        self.stems = {}
         for i, d in enumerate(self.docs):
-            tf = {}
+            tf, sf = {}, {}
             for t in d:
                 tf[t] = tf.get(t, 0) + 1
+                st = stem(t)
+                sf[st] = sf.get(st, 0) + 1
             for t, f in tf.items():
                 self.postings.setdefault(t, []).append((i, f))
+            for t, f in sf.items():
+                self.stems.setdefault(t, []).append((i, f))
         n = len(self.docs)
-        self.idf = {t: math.log(1 + (n - len(p) + 0.5) / (len(p) + 0.5))
-                    for t, p in self.postings.items()}
 
-    def bm25(self, query, k=CAND_K, k1=1.5, b=0.75):
+        def idf_of(posts):
+            return {t: math.log(1 + (n - len(p) + 0.5) / (len(p) + 0.5))
+                    for t, p in posts.items()}
+
+        self.idf = idf_of(self.postings)
+        self.stem_idf = idf_of(self.stems)
+        self.vocab = list(self.postings.keys())
+
+    def bm25(self, query, k=CAND_K):
+        return self.bm25_scores(query, k)[0]
+
+    def bm25_scores(self, query, k=CAND_K, k1=1.5, b=0.75):
         scores = {}
-        for t in set(tokenize(query)):
-            p = self.postings.get(t)
+
+        def add(posts, idfs, t, w):
+            p = posts.get(t)
             if not p:
-                continue
-            idf = self.idf[t]
+                return False
+            idf = idfs[t]
             for i, f in p:
                 denom = f + k1 * (1 - b + b * self.dl[i] / self.avgdl)
-                scores[i] = scores.get(i, 0.0) + idf * (f * (k1 + 1)) / denom
-        return sorted(scores, key=scores.get, reverse=True)[:k]
+                scores[i] = scores.get(i, 0.0) + w * idf * (f * (k1 + 1)) / denom
+            return True
+
+        for t in set(tokenize(query)):
+            exact = add(self.postings, self.idf, t, 1.0)
+            # forme flexionate: intrebi "garantia", in document scrie "garantie"
+            add(self.stems, self.stem_idf, stem(t), 0.45)
+            if not exact and len(t) >= 4:
+                # cuvant lipit in altul: "tva" din "calculeazaTva"
+                found = 0
+                for v in self.vocab:
+                    if t in v and add(self.postings, self.idf, v, 0.25):
+                        found += 1
+                        if found >= 20:
+                            break
+        return sorted(scores, key=scores.get, reverse=True)[:k], scores
 
     def dense(self, qvec, k=CAND_K):
         sims = self.emb @ qvec
@@ -135,15 +183,16 @@ class Index:
         return list(top[np.argsort(-sims[top])]), sims
 
     def search(self, query, qvec, top_k=TOP_K):
-        """Reciprocal Rank Fusion intre cautarea densa si BM25."""
+        """Cu vectori: RRF intre cautarea densa si BM25. Fara: doar BM25."""
+        b_ids, b_sc = self.bm25_scores(query, CAND_K)
+        if self.emb is None or qvec is None:
+            return [(i, float(b_sc.get(i, 0.0))) for i in b_ids[:top_k]]
         d_ids, sims = self.dense(qvec, CAND_K)
-        b_ids = self.bm25(query, CAND_K)
         rrf = {}
         for rank, i in enumerate(d_ids):
             rrf[i] = rrf.get(i, 0.0) + 1.0 / (60 + rank)
         for rank, i in enumerate(b_ids):
             rrf[i] = rrf.get(i, 0.0) + 1.0 / (60 + rank)
-        # bonus mic pentru fragmente din acelasi fisier ca top-1 dens
         best = sorted(rrf, key=rrf.get, reverse=True)[:top_k]
         return [(i, float(sims[i])) for i in best]
 
@@ -225,11 +274,12 @@ def build_context(idx, hits, budget=9000):
 
 
 def answer(idx, question, history, show=False):
-    try:
-        qvec = embed_query(question)
-    except Exception as e:
-        log("! serverul de embeddings nu raspunde: %s" % e)
-        return None
+    qvec = None
+    if idx.emb is not None:
+        try:
+            qvec = embed_query(question)
+        except Exception as e:
+            log("! embeddings indisponibile, caut doar pe cuvinte (%s)" % e)
     hits = idx.search(question, qvec, TOP_K)
     if not hits:
         print("Nu am gasit informatia in documentatie.")
