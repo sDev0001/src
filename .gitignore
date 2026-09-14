@@ -1,0 +1,21 @@
+# Imaginea Docker impachetata: artefact de build, 115 MB.
+# GitHub refuza fisiere peste 100 MB, si oricum se reface cu o comanda:
+#     cd agent_v2 && docker compose build && docker save rag-agent:latest | gzip -1 > rag-agent-image.tar.gz
+*.tar.gz
+*.tar
+
+# Indexul construit din documente: se reface singur la prima pornire.
+agent_v2/data/
+rag-agent/data/
+
+# Modele .gguf - sunt de ordinul gigabytilor
+*.gguf
+models/
+
+# Setari de editor
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
