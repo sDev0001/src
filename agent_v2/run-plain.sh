@@ -23,6 +23,15 @@ if LC_ALL=C grep -q "$CR" "$0" .env 2>/dev/null; then
   exec bash "$0" "$@"
 fi
 
+# Pe Oracle Linux "docker" e adesea podman. Folosim ce exista.
+DK="${DK:-}"
+if [ -z "$DK" ]; then
+  if command -v docker >/dev/null 2>&1; then DK=docker
+  elif command -v podman >/dev/null 2>&1; then DK=podman
+  else echo "! nu gasesc nici docker, nici podman" >&2; exit 1; fi
+fi
+echo "==> folosesc: $DK"
+
 IMG="${IMG:-rag-agent:latest}"
 NET=rag-agent
 LLM=rag-llm
@@ -36,14 +45,14 @@ THREADS="${THREADS:-8}"
 CTX="${CTX:-16384}"
 
 if [ "${1:-}" = "--stop" ]; then
-  if docker rm -f "$LLM" >/dev/null 2>&1; then echo "==> oprit"; else echo "==> nu rula nimic"; fi
+  if "$DK" rm -f "$LLM" >/dev/null 2>&1; then echo "==> oprit"; else echo "==> nu rula nimic"; fi
   exit 0
 fi
 
 # ---------------------------------------------------------------- verificari
-if ! docker image inspect "$IMG" >/dev/null 2>&1; then
+if ! "$DK" image inspect "$IMG" >/dev/null 2>&1; then
   echo "! imaginea $IMG nu e incarcata. Ruleaza intai:" >&2
-  echo "    docker load < rag-agent-image.tar.gz" >&2
+  echo "    $DK load < rag-agent-image.tar.gz" >&2
   exit 1
 fi
 
@@ -68,15 +77,15 @@ if [ "$NDOCS" -eq 0 ]; then
 fi
 
 mkdir -p ./data
-docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
+"$DK" network inspect "$NET" >/dev/null 2>&1 || "$DK" network create "$NET" >/dev/null
 
 # ---------------------------------------------------------------- serverul LLM
-if [ "$(docker inspect -f '{{.State.Running}}' "$LLM" 2>/dev/null)" != "true" ]; then
-  docker rm -f "$LLM" >/dev/null 2>&1 || true
+if [ "$("$DK" inspect -f '{{.State.Running}}' "$LLM" 2>/dev/null)" != "true" ]; then
+  "$DK" rm -f "$LLM" >/dev/null 2>&1 || true
   echo "==> pornesc serverul cu modelul"
   echo "    model:   $LLM_MODEL_FILE"
   echo "    threads: $THREADS (CPU, fara GPU)"
-  docker run -d --name "$LLM" --network "$NET" --restart unless-stopped \
+  "$DK" run -d --name "$LLM" --network "$NET" --restart unless-stopped \
     -v "$MODELS_DIR:/models:ro" "$IMG" \
     llama-server -m "/models/$LLM_MODEL_FILE" \
       --host 0.0.0.0 --port 8080 \
@@ -87,7 +96,7 @@ else
 fi
 
 # ---------------------------------------------------------------- agentul
-docker run --rm -it --network "$NET" \
+"$DK" run --rm -it --network "$NET" \
   -v "$DOCS_DIR:/docs:ro" \
   -v "$PWD/data:/agent/data" \
   -e "LLM_URL=http://$LLM:8080" \
