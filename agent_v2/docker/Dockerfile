@@ -51,9 +51,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONIOENCODING=utf-8
 
 # pdftotext pentru PDF-uri, tesseract pentru cele scanate (ro + ru + en),
-# python3 + numpy pentru index. Nimic grafic, nimic legat de GPU.
+# Nimic grafic, nimic legat de GPU.
+#
+# numpy NU e instalat, intentionat: cautarea pe cuvinte (cea implicita)
+# nu-l foloseste, iar pachetul ocupa 37 MB. E necesar doar pentru
+# cautarea semantica, care oricum ar cere si un al doilea server.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 python3-numpy \
+        python3 \
         poppler-utils \
         tesseract-ocr tesseract-ocr-ron tesseract-ocr-rus tesseract-ocr-eng \
         curl ca-certificates libgomp1 \
@@ -80,6 +84,6 @@ WORKDIR /app
 # Mai bine pica acum, cu mesaj clar, decat pe server peste doua zile.
 RUN set -eux; \
     llama-server --version 2>&1 | head -3; \
-    python3 -c "import numpy"; \
+    python3 -c "import json, re, urllib.request"; \
     command -v pdftotext; \
     command -v tesseract
